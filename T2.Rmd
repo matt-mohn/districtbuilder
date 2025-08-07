@@ -1,0 +1,82 @@
+---
+title: "Edit"
+author: "Matt Mohn"
+date: "2025-08-07"
+output: html_document
+---
+
+
+```{r}
+### function for identifying integral precincts
+get.integral.flags <- function(precincts, neighbours) {
+
+  list.of.districts <- unique(precincts$district)
+  
+  for(tgt.district in 1:length(list.of.districts))
+  {
+    
+  }
+
+  
+  
+  
+  
+
+
+  return()
+}
+
+
+```
+
+
+
+
+
+
+
+
+
+```{r setup, include=FALSE}
+library(sf)
+library(igraph)
+library(dplyr)
+library(tidyverse)
+library(sfdep)
+library(sf)
+library(dplyr)
+library(sfdep)
+
+precincts <- read_sf("geom/precincts.shp") %>%
+  mutate(district = as.integer(district)) %>%
+  filter(district %in% c(7, 38, 9, 18, 29))
+
+ggplot(data = precincts) +
+  geom_sf(mapping = aes(fill = as.factor(district))) +
+  theme_minimal()
+
+### Initialize continuity file -- this never changes even after edits
+
+continuity <- sfdep::st_contiguity(precincts)
+
+
+
+
+
+```
+
+
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

@@ -1,0 +1,173 @@
+---
+title: "Redistricting Workshop"
+author: "Matt Mohn"
+date: "2025-08-06"
+output: html_document
+---
+
+```{r setup}
+library(sf)
+library(igraph)
+library(dplyr)
+library(tidyverse)
+library(sfdep)
+library(sf)
+library(dplyr)
+library(sfdep)
+
+precincts <- read_sf("geom/precincts.shp") %>% mutate(district = as.integer(district))
+
+precincts.new <- precincts %>% filter(district%in%c(9,29))
+
+
+ggplot(data=precincts.new)+geom_sf(mapping=aes(fill=as.factor(district)),color=NA)+theme_minimal()
+
+```
+
+```{r}
+library(spdep)
+library(dplyr)
+
+random_redistrict_swap <- function(precincts, n = 5) {
+  
+  # Build two neighbor lists: queen for integral, rook for border
+  neighbours_integral <- poly2nb(precincts, queen = TRUE)
+  neighbours_border <- poly2nb(precincts, queen = FALSE)
+  
+  get_integral_flags <- function(precincts, neighbours) {
+    troublemakers <- rep(FALSE, length(neighbours))
+    
+    for (i in seq_along(neighbours)) {
+      dist_i <- precincts$district[i]
+      
+      # first-degree neighbors in same district using queen neighbors
+      first_degree <- neighbours[[i]]
+      first_degree <- first_degree[precincts$district[first_degree] == dist_i]
+      
+      if (length(first_degree) == 1) {
+        troublemakers[i] <- TRUE
+        next
+      }
+      
+      for (j in first_degree) {
+        second_deg <- neighbours[[j]]
+        second_deg <- second_deg[precincts$district[second_deg] == dist_i]
+        
+        wrk_diff <- intersect(second_deg, first_degree)
+        if (length(wrk_diff) == 0) {
+          troublemakers[i] <- TRUE
+        }
+      }
+    }
+    
+    return(troublemakers)
+  }
+  
+  valid_districts <- sort(unique(precincts$district))
+  precincts$index <- seq_len(nrow(precincts))
+  
+  swaps_done <- 0
+  precincts_edit <- precincts
+  
+  while (swaps_done < n) {
+    # 1. Recalculate integral flags with queen contiguity
+    precincts_edit$integral <- get_integral_flags(precincts_edit, neighbours_integral)
+    
+    # 2. Recalculate border flags with rook contiguity
+    precincts_edit$border <- sapply(seq_len(nrow(precincts_edit)), function(i) {
+      !precincts_edit$integral[i] &&
+      any(precincts_edit$district[neighbours_border[[i]]] != precincts_edit$district[i])
+    })
+    
+    swappable <- precincts_edit %>% filter(border) %>% pull(index)
+    if (length(swappable) == 0) break
+    
+    i <- sample(swappable, 1)
+    neighbors <- neighbours_border[[i]]
+    
+    other_districts <- precincts_edit$district[neighbors]
+    other_districts <- other_districts[other_districts != precincts_edit$district[i]]
+    other_districts <- other_districts[other_districts %in% valid_districts]
+    
+    if (length(other_districts) == 0) next
+    
+    pick <- sample(seq_along(other_districts), 1)
+    precincts_edit$district[i] <- other_districts[pick]
+    
+    swaps_done <- swaps_done + 1
+  }
+  
+  return(precincts_edit)
+}
+
+```
+
+```{r}
+districts2 <- random_redistrict_swap(precincts.new,n=55)
+ggplot(data=precincts.new)+geom_sf(mapping=aes(fill=as.factor(district)))+theme_minimal()
+ggplot(data=districts2)+geom_sf(mapping=aes(fill=as.factor(district)))+theme_minimal()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+neighbours <- sfdep::st_contiguity(precincts.d22)
+
+troublemakers <- rep(FALSE, times = length(neighbours)) 
+
+for (i in seq_along(neighbours)) {
+  
+  first_degree <- neighbours[[i]]
+  
+  # edge case of single neighbor districts needs to be handled;
+  # it can not create discontinuity and is safe to be ignored
+  if (length(first_degree) > 1) {
+  
+    for (j in seq_along(first_degree)) {
+    
+        #  j-th second degree neighbors vs first degree neighbors
+        wrk_diff <- intersect(unlist(neighbours[first_degree[j]]),
+                              first_degree)
+        
+        # if no common neighbor >> discontinuity!
+        if (length(wrk_diff) == 0) troublemakers[i] <- T
+    }
+  }
+  if(length(first_degree)==1) {
+    troublemakers[i] <- T
+  }
+}
+
+
+plot(st_geometry(precincts.d22))
+plot(st_geometry(precincts.d22[troublemakers, ]), col = "red", add = T)
+
+
+```
+
+
+
+
+
+```{r}
+check_district_contiguity(precincts)
+```
+
