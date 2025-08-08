@@ -19,22 +19,27 @@ library(gifski)
 NUM_GROUPS <- 10
 USE_POPULATION <- TRUE
 set.seed(42)
-shapefile.link <- "geom/houstonia_precincts2.shp"
+shapefile.link <- "geom/houstonia_precincts3.shp"
 
 ### Annealing settings
 min_temp <- 0.01
-max_iterations <- 10000
-start_temperature <- 6
-start_cooling_rate <- 0.99998
+max_iterations <- 100000
+start_temperature <- 10
+end_temperature <- 0.05
+
+start_cooling_rate <- (end_temperature / start_temperature)^(1/max_iterations)
+
+
+### 0.01 at end, #1 at start,
 
 ### Dynamic annealing configurations
-slow_cooling_rate = 0.995
-slow_cooling_trigger = 100
+slow_cooling_rate = 0.9999
+slow_cooling_trigger = 10000000 ## ignore for now
 
 ### Settings for border focus
-max.border.focus.pct <- 0.5
+max.border.focus.pct <- 0.75
 min.border.focus.pct <- 0.01
-midway.border.focus.pct <- 0.5
+midway.border.focus.pct <- 0.75
 
 ### Settings for island focus
 max.island.focus.pct <- 0.25
@@ -48,13 +53,13 @@ kill.dynamic = FALSE
 kill.dynamic.pct = 0.1
 
 ### Settings for allowing a 'static' stop
-kill.static = TRUE
+kill.static = FALSE
 kill.static.num = 5000
 
 ### Settings for allowing a 'success' stop
 kill.success = TRUE
 kill.success.max_cohesive = 0.005
-kill.success.max_cohesive = 0.02
+kill.success.max_population = 0.02
 kill.success.max_external = 0.1
 
 config.annealer.iofreq = 1000
@@ -72,6 +77,9 @@ config.gif.title.size = 14
 config.gif.size = 0.1
 config.gif.snapshotfreq = 2000
 dissolved_gif = FALSE
+
+map.counties = TRUE
+continuity.surge = FALSE
 
 
 # Helper functions (later for separate file) ------------------------------
@@ -131,7 +139,7 @@ calculate_external_interface_index_fast <- function(group_indices, group_assignm
 }
 
 # Function to calculate overall score
-calculate_score_fast <- function(group_assignments) {
+calculate_score_fast <- function(group_assignments,continuity.surge = FALSE) {
   cohesive_indices <- numeric(NUM_GROUPS)
   population_indices <- numeric(NUM_GROUPS)
   external_interface_indices <- numeric(NUM_GROUPS)
@@ -161,24 +169,23 @@ calculate_score_fast <- function(group_assignments) {
   min_external <- min(external_interface_indices)
   max_external <- max(external_interface_indices)
   
-  # Scoring function
-  if (USE_POPULATION) {
-    # Combined score: heavily penalize worst-performing groups in all metrics
-    ci_score <- 0.1 * avg_cohesive + 0.9 * max_cohesive^3
-    pi_score <- 0.1 * avg_population + 0.9 * max_population^2
-    xi_score <- 0.1 * avg_external + 0.9 * max_external^2 # Lower XI is better (more compact)
+    ci_score <- 0.1 * (avg_cohesive*100) + 0.9 * (max_cohesive*100)^2
+    pi_score <- 0.1 * (avg_population*100) + 0.9 * (max_population*100)^2
+    xi_score <- 0.1 * (avg_external*100) + 0.9 * (max_external*100)^2 
     
-    # Weight CI most heavily, then PI, then XI
-    score <- 0.7 * ci_score + 0.2 * pi_score + 0.1 * xi_score
-  } else {
-    # Only optimize for contiguity and compactness
-    ci_score <- 0.1 * avg_cohesive + 0.9 * max_cohesive^3
-    xi_score <- 0.1 * avg_external + 0.9 * max_external^2
     
-    # Weight CI more heavily than XI
-    score <- 0.8 * ci_score + 0.2 * xi_score
-  }
-  
+    if(continuity.surge==FALSE)
+    {
+      score <- 0.7 * ci_score + 0.2 * pi_score + 0.1 * xi_score
+    }
+
+
+    if(continuity.surge)
+    {
+      score <- 0.7 * ci_score + 0.2 * pi_score + 0.1 * xi_score
+    }
+    
+    
   return(list(
     score = score,
     avg_cohesive = avg_cohesive,
@@ -202,12 +209,25 @@ calculate_score_fast <- function(group_assignments) {
 
 # Run ---------------------------------------------------------------------
 
-
-
-
 cat("Reading shapefile...\n")
 # Read the shapefile
 shapes <- st_read(shapefile.link, quiet = TRUE)
+
+
+if("countyid"%in%names(shapes) && map.counties){
+  
+  counties.shape <- shapes %>% 
+    group_by(countyid) %>% 
+    summarise(geometry = st_union(geometry))
+  counties <- geom_sf(data=counties.shape,
+                      fill=NA,
+                      color="white",
+                      linewidth=0.5)
+  
+}else{
+  map.counties <- FALSE
+  counties <- NULL
+}
 
 # Parse population data
 cat("Parsing population data...\n")
@@ -263,18 +283,14 @@ cat("Initial Max Cohesive Index:", round(current_metrics$max_cohesive, 4), "\n")
 cat("Initial Avg External Interface Index:", round(current_metrics$avg_external, 4), "\n")
 cat("Initial Min External Interface Index:", round(current_metrics$min_external, 4), "\n")
 cat("Initial Max External Interface Index:", round(current_metrics$max_external, 4), "\n")
-if (USE_POPULATION) {
   cat("Initial Avg Population Index:", round(current_metrics$avg_population, 4), "\n")
   cat("Initial Min Population Index:", round(current_metrics$min_population, 4), "\n")
   cat("Initial Max Population Index:", round(current_metrics$max_population, 4), "\n")
-}
 cat("\n")
 
 # Store initial state for plotting
 initial_groups <- current_groups
 
-# Simulated annealing parameters - dynamically adjusted
-cooling_params <- get_cooling_params(max_iterations)
 initial_temp <- start_temperature
 cooling_rate <- start_cooling_rate
 
@@ -319,11 +335,20 @@ no_improvement_count <- 0
 cat("Starting simulated annealing...\n")
 start_time <- Sys.time()
 
+continuity.surge <- F
+
 for (iter in 1:max_iterations) {
   # Calculate probability for border-focused and island-focused edits
   midway_point <- as.integer(round(max_iterations*midway.hinge.pct,digits=0))
   p_border <- min(max.border.focus.pct, min.border.focus.pct + ((midway.border.focus.pct - min.border.focus.pct) * min(iter / midway_point, 1)))
   p_island <- min(max.island.focus.pct , min.island.focus.pct + ((midway.island.focus.pct - min.island.focus.pct) * min(iter / midway_point, 1)))
+  
+  if(continuity.surge)
+  {
+    p_border <- p_border^(1/3)
+    p_island <- p_island^(1/3)
+  }
+  
   
   # Determine edit type
   rand_val <- runif(1)
@@ -424,14 +449,25 @@ for (iter in 1:max_iterations) {
     candidate_groups[shape_idx] <- new_group
   }
   
-  # Calculate candidate score
-  candidate_metrics <- calculate_score_fast(candidate_groups)
-  candidate_score <- candidate_metrics$score
+  last.reading <- continuity.surge
   
+  candidate_metrics <- calculate_score_fast(candidate_groups,continuity.surge)
+  candidate_score <- candidate_metrics$score
+
   # Acceptance criteria
   delta <- candidate_score - current_score
   
-  if (delta < 0 || (temperature > min_temp && runif(1) < exp(-delta / temperature))) {
+  pass.through <- T
+  
+  if(last.reading) ## if contiguity mode activated
+  {
+    if(candidate_metrics$max_cohesive > current_metrics$max_cohesive)
+    {
+      pass.through <- F
+    }
+  }
+  
+  if (pass.through && (delta < 0 || (temperature > min_temp && runif(1) < exp(-delta / temperature)))) {
     # Accept the candidate solution
     current_groups <- candidate_groups
     current_score <- candidate_score
@@ -443,6 +479,23 @@ for (iter in 1:max_iterations) {
       best_score <- current_score
       best_metrics <- current_metrics
       no_improvement_count <- 0
+      
+      ### If currently set OFF, and falls into range
+      if(!last.reading && current_metrics$max_cohesive<0.3 && current_metrics$max_cohesive>0.03)
+      {
+        continuity.surge = TRUE
+        cat("Entered contiguity mode")
+        print(iter)
+      }
+      
+      ### If currently set ON, and falls out of range
+      if(last.reading && current_metrics$max_cohesive<0.03)
+      {
+        continuity.surge = FALSE
+        cat("Left contiguity mode")
+        print(iter)
+      }
+      
     } else {
       no_improvement_count <- no_improvement_count + 1
     }
@@ -490,7 +543,7 @@ for (iter in 1:max_iterations) {
       elapsed <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
       improvement <- round((progress_data$score[1] - current_score) / progress_data$score[1] * 100, 1)
       
-      if (USE_POPULATION) {
+
         cat(sprintf(
           "Iter %d: Score=%.4f (%.1f%% better), CI: Avg=%.3f Max=%.3f, PI: Avg=%.3f Max=%.3f, XI: Avg=%.3f Max=%.3f, T=%.4f (%.1fs)\n",
           iter, current_score, improvement,
@@ -499,21 +552,13 @@ for (iter in 1:max_iterations) {
           current_metrics$avg_external, current_metrics$max_external,
           temperature, elapsed
         ))
-      } else {
-        cat(sprintf(
-          "Iter %d: Score=%.4f (%.1f%% better), CI: Avg=%.3f Max=%.3f, XI: Avg=%.3f Max=%.3f, T=%.4f (%.1fs)\n",
-          iter, current_score, improvement,
-          current_metrics$avg_cohesive, current_metrics$max_cohesive,
-          current_metrics$avg_external, current_metrics$max_external,
-          temperature, elapsed
-        ))
-      }
+       
     }
   }
   
   # Check for excellent solutions
   good_contiguity <- current_metrics$max_cohesive < kill.success.max_cohesive
-  good_population <- !USE_POPULATION || current_metrics$max_population < kill.success.max_cohesive
+  good_population <- current_metrics$max_population < kill.success.max_population
   good_compactness <- current_metrics$max_external < kill.success.max_external
   
   if (kill.success && good_contiguity && good_population && good_compactness) {
@@ -569,12 +614,10 @@ cat("Best Max Cohesive Index:", round(best_metrics$max_cohesive, 4), "\n")
 cat("Best Avg External Interface Index:", round(best_metrics$avg_external, 4), "\n")
 cat("Best Min External Interface Index:", round(best_metrics$min_external, 4), "\n")
 cat("Best Max External Interface Index:", round(best_metrics$max_external, 4), "\n")
-
-if (USE_POPULATION) {
   cat("Best Avg Population Index:", round(best_metrics$avg_population, 4), "\n")
   cat("Best Min Population Index:", round(best_metrics$min_population, 4), "\n")
   cat("Best Max Population Index:", round(best_metrics$max_population, 4), "\n")
-}
+
 
 improvement_pct <- round((progress_data$score[1] - best_score) / progress_data$score[1] * 100, 1)
 cat("Overall improvement:", improvement_pct, "%\n")
@@ -603,9 +646,10 @@ shapes$final_group <- as.factor(best_groups)
 cat("\nGenerating plots...\n")
 
 # Plot 1: Initial map
-p1 <- ggplot(shapes %>% group_by(initial_group) %>% summarise(geometry = st_union(geometry))) +
-  geom_sf(aes(fill = initial_group), color = "white", size = 0.1) +
+p1 <- ggplot(shapes) +
+  geom_sf(aes(fill = initial_group), color = NA, size = 0.1) +
   scale_fill_viridis_d(name = "Group") +
+  counties +
   ggtitle("Initial Random Assignment") +
   theme_void() +
   theme(
@@ -614,9 +658,10 @@ p1 <- ggplot(shapes %>% group_by(initial_group) %>% summarise(geometry = st_unio
   )
 
 # Plot 2: Final optimized map
-p2 <- ggplot(shapes %>% group_by(final_group) %>% summarise(geometry = st_union(geometry))) +
-  geom_sf(aes(fill = final_group), color = "white", size = 0.1) +
+p2 <- ggplot(shapes) +
+  geom_sf(aes(fill = final_group), color = NA, size = 0.1) +
   scale_fill_viridis_d(name = "Group") +
+  counties+
   ggtitle(paste0("Final Optimized Assignment (", improvement_pct, "% better)")) +
   theme_void() +
   theme(
@@ -692,15 +737,17 @@ p6 <- ggplot(progress_data) +
     plot.title = element_text(hjust = 0.5, size = 12)
   )
 
-# Combined plots for better comparison
-if (USE_POPULATION) {
-  # Show all six plots in a 3x2 grid
-  combined_plot <- grid.arrange(p1, p2, p3, p4, p5, p6, ncol = 2, nrow = 3)
-} else {
-  # Show five relevant plots (excluding PI)
-  combined_plot <- grid.arrange(p1, p2, p3, p5, p6, ncol = 2, nrow = 3)
-  cat("Note: Population optimization was disabled, but PI is still tracked and displayed.\n")
-}
+
+  combined_plot <- grid.arrange(p1, p2, p3+ylim(0,1)+
+                                  geom_hline(yintercept=0)+
+                                  geom_hline(yintercept=1), p4+ylim(0,1)+
+                                  geom_hline(yintercept=0)+
+                                  geom_hline(yintercept=1), p5+ylim(0,1)+
+                                  geom_hline(yintercept=0)+
+                                  geom_hline(yintercept=1), p6+ylim(0,start_temperature)+
+                                  geom_hline(yintercept=start_temperature)+
+                                  geom_hline(yintercept=0), ncol = 2, nrow = 3)
+
 
 print(combined_plot)
 
@@ -734,24 +781,11 @@ if (MAKE_GIF && nrow(gif_snapshots) > 0) {
     temp_shapes$current_group <- as.factor(iter_data$group[match(1:n_shapes, iter_data$shape_id)])
     
     # Create plot for this iteration
-    if(dissolved_gif == TRUE){
-      p <- ggplot(temp_shapes %>% group_by(current_group) %>% summarise(geometry = st_union(geometry))) +
-        geom_sf(aes(fill = current_group), color = "black", size = config.gif.size) +
-        scale_fill_viridis_d(name = "Group") +
-        ggtitle(paste("Optimization Progress: Iteration", iter)) +
-        theme_void() +
-        theme(
-          plot.title = element_text(hjust = 0.5, size = config.gif.title.size, face = "bold"),
-          legend.position = "bottom",
-          plot.margin = margin(config.gif.margin, config.gif.margin, config.gif.margin, config.gif.margin)
-        )
-    }
-    
-    # Create plot for this iteration
     if(dissolved_gif == FALSE){
       p <- ggplot(temp_shapes) +
-        geom_sf(aes(fill = current_group), color = NA, size = config.gif.size) +
-        scale_fill_viridis_d(name = "Group") +
+        geom_sf(aes(fill = as.factor(current_group)), color = NA, size = config.gif.size) +
+        scale_fill_brewer(name = "district",palette = "Set3") +
+        counties+
         ggtitle(paste("Optimization Progress: Iteration", iter)) +
         theme_void() +
         theme(
@@ -790,4 +824,4 @@ cat("\nSummary Statistics:\n")
 cat("Total iterations run:", max(progress_data$iteration), "\n")
 cat("Runtime:", round(total_time, 1), "seconds\n")
 cat("Avg iterations per second:", round(max(progress_data$iteration) / total_time, 0), "\n")
-cat("Mode: ", ifelse(USE_POPULATION, "Contiguity + Population + Compactness", "Contiguity + Compactness"), "\n")
+cat("Mode: ","Contiguity + Population + Compactness", "\n")
