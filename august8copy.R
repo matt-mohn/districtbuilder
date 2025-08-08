@@ -23,18 +23,13 @@ shapefile.link <- "geom/houstonia_precincts3.shp"
 
 ### Annealing settings
 min_temp <- 0.01
-max_iterations <- 100000
-start_temperature <- 10
+max_iterations <- 10000
+initial_temp <- 10
 end_temperature <- 0.05
 
-start_cooling_rate <- (end_temperature / start_temperature)^(1/max_iterations)
 
-
-### 0.01 at end, #1 at start,
-
-### Dynamic annealing configurations
-slow_cooling_rate = 0.9999
-slow_cooling_trigger = 10000000 ## ignore for now
+use.auto.cool.rate <- TRUE
+manual.cool.rate <- 0.9995
 
 ### Settings for border focus
 max.border.focus.pct <- 0.75
@@ -65,6 +60,10 @@ kill.success.max_external = 0.1
 config.annealer.iofreq = 1000
 config.chart.snapshotfreq = 10
 
+auto.constrain.continuity = TRUE
+auto.constrain.continuity.upperbound = 0.3
+auto.constrain.continuity.lowerbound = 0.03
+
 ### Art settings
 MAKE_GIF <- TRUE
 config.gif.fps = 2
@@ -79,7 +78,17 @@ config.gif.snapshotfreq = 2000
 dissolved_gif = FALSE
 
 map.counties = TRUE
-continuity.surge = FALSE
+constrain.continuity = FALSE
+
+
+
+cooling_rate <- if(use.auto.cool.rate)
+{
+  (end_temperature / initial_temp)^(1/max_iterations)
+} else
+{
+  manual.cool.rate
+}
 
 
 # Helper functions (later for separate file) ------------------------------
@@ -139,7 +148,7 @@ calculate_external_interface_index_fast <- function(group_indices, group_assignm
 }
 
 # Function to calculate overall score
-calculate_score_fast <- function(group_assignments,continuity.surge = FALSE) {
+calculate_score_fast <- function(group_assignments,constrain.continuity = FALSE) {
   cohesive_indices <- numeric(NUM_GROUPS)
   population_indices <- numeric(NUM_GROUPS)
   external_interface_indices <- numeric(NUM_GROUPS)
@@ -174,13 +183,13 @@ calculate_score_fast <- function(group_assignments,continuity.surge = FALSE) {
     xi_score <- 0.1 * (avg_external*100) + 0.9 * (max_external*100)^2 
     
     
-    if(continuity.surge==FALSE)
+    if(constrain.continuity==FALSE)
     {
       score <- 0.7 * ci_score + 0.2 * pi_score + 0.1 * xi_score
     }
 
 
-    if(continuity.surge)
+    if(constrain.continuity)
     {
       score <- 0.7 * ci_score + 0.2 * pi_score + 0.1 * xi_score
     }
@@ -291,8 +300,7 @@ cat("\n")
 # Store initial state for plotting
 initial_groups <- current_groups
 
-initial_temp <- start_temperature
-cooling_rate <- start_cooling_rate
+
 
 cat("Using dynamic parameters:\n")
 cat("Max iterations:", max_iterations, "\n")
@@ -335,7 +343,7 @@ no_improvement_count <- 0
 cat("Starting simulated annealing...\n")
 start_time <- Sys.time()
 
-continuity.surge <- F
+constrain.continuity <- F
 
 for (iter in 1:max_iterations) {
   # Calculate probability for border-focused and island-focused edits
@@ -343,7 +351,7 @@ for (iter in 1:max_iterations) {
   p_border <- min(max.border.focus.pct, min.border.focus.pct + ((midway.border.focus.pct - min.border.focus.pct) * min(iter / midway_point, 1)))
   p_island <- min(max.island.focus.pct , min.island.focus.pct + ((midway.island.focus.pct - min.island.focus.pct) * min(iter / midway_point, 1)))
   
-  if(continuity.surge)
+  if(constrain.continuity)
   {
     p_border <- p_border^(1/3)
     p_island <- p_island^(1/3)
@@ -449,9 +457,9 @@ for (iter in 1:max_iterations) {
     candidate_groups[shape_idx] <- new_group
   }
   
-  last.reading <- continuity.surge
+  last.reading.constrain.continuity <- constrain.continuity
   
-  candidate_metrics <- calculate_score_fast(candidate_groups,continuity.surge)
+  candidate_metrics <- calculate_score_fast(candidate_groups,constrain.continuity)
   candidate_score <- candidate_metrics$score
 
   # Acceptance criteria
@@ -459,7 +467,7 @@ for (iter in 1:max_iterations) {
   
   pass.through <- T
   
-  if(last.reading) ## if contiguity mode activated
+  if(last.reading.constrain.continuity) ## if contiguity mode activated
   {
     if(candidate_metrics$max_cohesive > current_metrics$max_cohesive)
     {
@@ -481,18 +489,18 @@ for (iter in 1:max_iterations) {
       no_improvement_count <- 0
       
       ### If currently set OFF, and falls into range
-      if(!last.reading && current_metrics$max_cohesive<0.3 && current_metrics$max_cohesive>0.03)
+      if(!last.reading.constrain.continuity && current_metrics$max_cohesive< auto.constrain.continuity.upperbound && current_metrics$max_cohesive>auto.constrain.continuity.lowerbound && auto.constrain.continuity)
       {
-        continuity.surge = TRUE
-        cat("Entered contiguity mode")
+        constrain.continuity = TRUE
+        cat("Entered constrained contiguity mode")
         print(iter)
       }
       
       ### If currently set ON, and falls out of range
-      if(last.reading && current_metrics$max_cohesive<0.03)
+      if(last.reading.constrain.continuity && current_metrics$max_cohesive<auto.constrain.continuity.lowerbound && auto.constrain.continuity)
       {
-        continuity.surge = FALSE
-        cat("Left contiguity mode")
+        constrain.continuity = FALSE
+        cat("Left constraited contiguity mode")
         print(iter)
       }
       
@@ -503,12 +511,9 @@ for (iter in 1:max_iterations) {
     no_improvement_count <- no_improvement_count + 1
   }
   
-  # Adaptive cooling - slow down cooling if no improvement
-  if (no_improvement_count > slow_cooling_trigger) {
-    temperature <- temperature * slow_cooling_rate
-  } else {
+
     temperature <- temperature * cooling_rate # Normal cooling
-  }
+  
   
   # Store progress every few iterations
   if (iter %% config.chart.snapshotfreq == 0) {
